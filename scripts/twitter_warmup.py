@@ -28,8 +28,8 @@ MAX_STEPS = 50
 START_HOUR = 6
 END_HOUR = 21
 
-COOLDOWN_MIN_MINUTES = 30
-COOLDOWN_MAX_MINUTES = 90
+COOLDOWN_MIN_MINUTES = 20
+COOLDOWN_MAX_MINUTES = 50
 
 # Keyword pools
 GENERAL_KEYWORDS = [
@@ -130,7 +130,7 @@ def build_task4_prompt(is_first_cycle):
             "at bottom-right). "
             "Write a tweet about the trending topic you picked. The tweet should be "
             "10-15 sentences long, written in a casual personal style with your own opinion. "
-            "Do NOT use hashtags excessively (max 2 hashtags). "
+            "Do NOT use any hashtags at all. "
             "Do NOT copy text from anywhere - write original content. "
             "After typing, tap the 'Post' button to publish the tweet. "
             "When done, press the home button to close the app. "

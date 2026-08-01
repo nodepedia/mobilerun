@@ -31,6 +31,13 @@ credentials.yaml
 **/credentials.yaml
 !**/credentials_example.yaml
 
+# Twitter warm-up credentials
+twitter_credentials.yaml
+**/twitter_credentials.yaml
+
+# Twitter warm-up config (contains no secrets but is project-specific)
+# twitter_warmup.yaml
+
 .*/
 !.gitignore
 !.github/

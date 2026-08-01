@@ -1,0 +1,116 @@
+# Twitter Warm-Up Configuration
+# Used by: mobilerun run -c config/twitter_warmup.yaml "<task prompt>"
+# This config enables stealth mode, Twitter app card, credentials, and a custom
+# system prompt with device unlock rules and warm-up behavior guidelines.
+
+_version: 7
+
+# === Agent Settings ===
+agent:
+  max_steps: 50
+  reasoning: false
+  streaming: true
+  vision_only: false
+  after_sleep_action: 1.0
+  wait_for_stable_ui: 0.3
+  use_normalized_coordinates: false
+
+  fast_agent:
+    vision: false
+    parallel_tools: true
+    system_prompt: config/prompts/twitter_warmup_system.jinja2
+    user_prompt: config/prompts/fast_agent/user.jinja2
+
+  manager:
+    vision: false
+    system_prompt: null
+    stateless: false
+
+  executor:
+    vision: false
+    system_prompt: config/prompts/executor/system.jinja2
+
+  app_cards:
+    enabled: true
+    mode: local
+    app_cards_dir: config/app_cards
+    server_url: null
+    server_timeout: 10.0
+    server_max_retries: 2
+
+# === LLM Profiles ===
+llm_profiles:
+  manager:
+    provider: GoogleGenAI
+    model: gemini-3.5-flash-lite
+    temperature: 0.2
+
+  executor:
+    provider: GoogleGenAI
+    model: gemini-3.5-flash-lite
+    temperature: 0.1
+
+  fast_agent:
+    provider: GoogleGenAI
+    model: gemini-3.5-flash-lite
+    temperature: 0.2
+
+  app_opener:
+    provider: GoogleGenAI
+    model: gemini-3.5-flash-lite
+    temperature: 0.0
+
+  structured_output:
+    provider: GoogleGenAI
+    model: gemini-3.5-flash-lite
+    temperature: 0.0
+
+# === Device Settings ===
+device:
+  serial: null
+  control_backend: null
+  device_id: auto
+  use_tcp: false
+  platform: android
+  portal_mode: auto
+  auto_setup: true
+  auth_token: null
+
+# === Telemetry ===
+telemetry:
+  enabled: true
+
+# === Tracing ===
+tracing:
+  enabled: false
+  provider: phoenix
+  langfuse_screenshots: false
+  langfuse_secret_key: ""
+  langfuse_public_key: ""
+  langfuse_host: ""
+  langfuse_user_id: "anonymous"
+  langfuse_session_id: ""
+
+# === Logging ===
+logging:
+  debug: false
+  save_trajectory: none
+  trajectory_path: trajectories
+  trajectory_gifs: true
+  rich_text: false
+
+# === Tools ===
+tools:
+  stealth: true
+
+# === Credentials ===
+credentials:
+  enabled: true
+  file_path: config/twitter_credentials.yaml
+
+# === MCP ===
+mcp:
+  enabled: false
+
+# === External Agents ===
+# external_agents: {}

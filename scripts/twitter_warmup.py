@@ -23,7 +23,7 @@ from datetime import datetime, timedelta
 # ============================================================
 
 CONFIG_PATH = "config/twitter_warmup.yaml"
-MAX_STEPS = 50
+MAX_STEPS = 200
 
 START_HOUR = 6
 END_HOUR = 21
@@ -72,9 +72,9 @@ def build_task1_prompt():
     """Task 1: Morning browse - trending + following feed."""
     return (
         "Open Twitter/X app. Go to the Search tab and read the trending topics for "
-        "about 2-3 minutes (scroll through the trends list). "
+        "about 1-2 minutes (scroll through the trends list). "
         "Then go to the Home tab, switch to the 'Following' feed, and scroll through "
-        "tweets from people you follow for 5-7 minutes. "
+        "tweets from people you follow for 2-3 minutes. "
         "Like 2-3 tweets that seem interesting. "
         "Use the wait tool between scrolls to simulate reading. "
         "When done, press the home button to close the app. "
@@ -139,8 +139,8 @@ def build_task4_prompt(is_first_cycle):
     else:
         return (
             "Open Twitter/X app. Go to the Search tab and check the trending topics "
-            "for 2-3 minutes. Read what's being discussed. "
-            "Then go to the Home tab and scroll the 'For You' feed for 2-3 minutes. "
+            "for 1-2 minutes. Read what's being discussed. "
+            "Then go to the Home tab and scroll the 'For You' feed for 1-2 minutes. "
             "Like 1 tweet if you see something interesting. "
             "Do NOT post any tweet in this session. "
             "When done, press the home button to close the app. "
@@ -151,6 +151,8 @@ def build_task4_prompt(is_first_cycle):
 # ============================================================
 # Runner
 # ============================================================
+
+TASK_TIMEOUT_SECONDS = 900  # 15 minutes per task max
 
 def run_task(prompt, task_name):
     """Execute a single warm-up task via mobilerun CLI."""
@@ -169,8 +171,12 @@ def run_task(prompt, task_name):
             ],
             capture_output=False,
             text=True,
+            timeout=TASK_TIMEOUT_SECONDS,
         )
         success = result.returncode == 0
+    except subprocess.TimeoutExpired:
+        print(f"[TIMEOUT] Task exceeded {TASK_TIMEOUT_SECONDS}s limit — killed.")
+        return False
     except FileNotFoundError:
         print(f"[ERROR] mobilerun command not found. Make sure it's installed.")
         return False
@@ -230,26 +236,30 @@ def run_daily_warmup():
 
         # Task 1: Trending + Following feed
         if is_within_time_window():
-            run_task(build_task1_prompt(), "Task 1: Trending + Following Feed")
+            if not run_task(build_task1_prompt(), "Task 1: Trending + Following Feed"):
+                print("[WARN] Task 1 failed — continuing to next task.")
         if is_within_time_window():
             cooldown()
 
         # Task 2: Search keyword + like + reply
         if is_within_time_window():
-            run_task(build_task2_prompt(), "Task 2: Search Keyword + Like + Reply")
+            if not run_task(build_task2_prompt(), "Task 2: Search Keyword + Like + Reply"):
+                print("[WARN] Task 2 failed — continuing to next task.")
         if is_within_time_window():
             cooldown()
 
         # Task 3: Follow accounts
         if is_within_time_window():
-            run_task(build_task3_prompt(), "Task 3: Follow Accounts (2-5)")
+            if not run_task(build_task3_prompt(), "Task 3: Follow Accounts (2-5)"):
+                print("[WARN] Task 3 failed — continuing to next task.")
         if is_within_time_window():
             cooldown()
 
         # Task 4: Tweet (first cycle) or Browse trending (subsequent)
         if is_within_time_window():
             task4_name = "Task 4: Post Tweet" if is_first else "Task 4: Browse Trending (no tweet)"
-            run_task(build_task4_prompt(is_first), task4_name)
+            if not run_task(build_task4_prompt(is_first), task4_name):
+                print("[WARN] Task 4 failed — continuing to next task.")
         if is_within_time_window():
             cooldown()
 

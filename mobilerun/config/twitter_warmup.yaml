@@ -7,7 +7,7 @@ _version: 7
 
 # === Agent Settings ===
 agent:
-  max_steps: 50
+  max_steps: 200
   reasoning: false
   streaming: true
   vision_only: false

@@ -42,9 +42,22 @@ class ToolResult:
     is_error: bool = False
 
 
+# Regex for fallback extraction when ET.fromstring fails.
+# Matches <invoke name="..."> blocks and <parameter name="...">value</parameter> pairs.
+# The invoke pattern tolerates a missing </invoke> by also matching to end-of-string
+# or the next <invoke>.
+_INVOKE_RE = re.compile(
+    r'<invoke\s+name="([^"]*)"[^>]*>(.*?)(?:</invoke>|(?=<invoke\s)|\Z)',
+    re.DOTALL,
+)
+_PARAM_NAME_RE = re.compile(
+    r'<parameter\s+name="([^"]*)"[^>]*>(.*?)</parameter>', re.DOTALL
+)
+
+
 def parse_tool_calls(
     text: str, param_types: Optional[Dict[str, str]] = None
-) -> Tuple[str, List[ToolCall]]:
+) -> Tuple[str, List[ToolCall], Optional[str]]:
     """Parse tool calls from LLM response text.
 
     Args:
@@ -53,31 +66,68 @@ def parse_tool_calls(
                      If None, all values are kept as strings.
 
     Returns:
-        Tuple of (text_before_tool_calls, list_of_tool_calls).
-        If no tool calls found, returns (full_text, []).
+        Tuple of (text_before_tool_calls, list_of_tool_calls, parse_error).
+        If no <function_calls> tags found, returns (full_text, [], None).
+        If tags were present but all blocks failed to parse, returns
+        (text_before, [], error_message) where error_message describes
+        the failure so the caller can feed it back to the LLM.
     """
     if OPEN_TAG not in text:
-        return text.strip(), []
+        return text.strip(), [], None
 
     parts = text.split(OPEN_TAG)
     text_before = parts[0].strip()
 
     call_blocks: List[List[ToolCall]] = []
+    total_block_count = 0
+    failed_block_count = 0
+    error_samples: List[str] = []
+
     for part in parts[1:]:
         close_idx = part.find(CLOSE_TAG)
         if close_idx == -1:
-            continue  # Malformed — no closing tag, skip
+            # No closing tag — treat as malformed but attempt regex fallback
+            block = part.strip()
+            if not block:
+                continue
+            total_block_count += 1
+            calls, err = _parse_tool_call_block(block, param_types)
+            if calls:
+                call_blocks.append(calls)
+            else:
+                failed_block_count += 1
+                if err and len(error_samples) < 2:
+                    error_samples.append(err)
+            continue
 
         block = part[:close_idx].strip()
         if not block:
             continue
 
-        calls = _parse_tool_call_block(block, param_types)
+        total_block_count += 1
+        calls, err = _parse_tool_call_block(block, param_types)
         if calls:
             call_blocks.append(calls)
+        else:
+            failed_block_count += 1
+            if err and len(error_samples) < 2:
+                error_samples.append(err)
 
     deduped_blocks = _drop_adjacent_duplicate_blocks(call_blocks)
-    return text_before, [call for block in deduped_blocks for call in block]
+    all_calls = [call for block in deduped_blocks for call in block]
+
+    parse_error: Optional[str] = None
+    if total_block_count > 0 and not all_calls:
+        detail = "; ".join(error_samples) if error_samples else "unknown parse error"
+        parse_error = (
+            f"Your response contained {total_block_count} <function_calls> block(s) "
+            f"but none could be parsed into valid tool calls ({detail}). "
+            "Please regenerate your tool call with valid XML. "
+            'Use exactly: <function_calls><invoke name="TOOL_NAME">'
+            '<parameter name="PARAM">value</parameter></invoke></function_calls>'
+        )
+
+    return text_before, all_calls, parse_error
 
 
 def format_tool_results(results: List[ToolResult]) -> str:
@@ -137,15 +187,45 @@ def extract_add_memory(text: str) -> str:
 
 def _parse_tool_call_block(
     block: str, param_types: Optional[Dict[str, str]]
-) -> List[ToolCall]:
-    block = _sanitize_param_content(block)
+) -> Tuple[List[ToolCall], Optional[str]]:
+    """Parse a single <function_calls> block body.
+
+    Attempts strict XML parsing first.  If that fails (e.g. the LLM
+    emitted malformed tags), falls back to a regex-based extractor that
+    salvages <invoke>/<parameter> pairs from the raw text.
+
+    Returns:
+        (calls, error).  ``error`` is None when parsing (or fallback)
+        produced at least one call.  When the block is completely
+        unparseable, returns ([], reason).
+    """
+    sanitized = _sanitize_param_content(block)
 
     try:
-        root = ET.fromstring(f"<root>{block}</root>")
-    except ET.ParseError:
-        logger.warning("Failed to parse tool call XML block, skipping")
-        return []
+        root = ET.fromstring(f"<root>{sanitized}</root>")
+        calls = _extract_calls_from_element(root, param_types)
+        if calls:
+            return calls, None
+        # XML parsed but no <invoke> found — try fallback before giving up
+    except ET.ParseError as exc:
+        logger.warning("XML parse failed, trying regex fallback: %s", exc)
 
+    # Regex fallback — salvage what we can from malformed XML
+    fallback_calls = _regex_fallback_parse(sanitized, param_types)
+    if fallback_calls:
+        logger.info(
+            "Regex fallback recovered %d tool call(s) from malformed XML",
+            len(fallback_calls),
+        )
+        return fallback_calls, None
+
+    return [], "malformed XML could not be parsed"
+
+
+def _extract_calls_from_element(
+    root: ET.Element, param_types: Optional[Dict[str, str]]
+) -> List[ToolCall]:
+    """Extract ToolCall objects from a parsed XML root element."""
     calls: List[ToolCall] = []
     for invoke in root.findall("invoke"):
         name = invoke.get("name", "")
@@ -167,6 +247,35 @@ def _parse_tool_call_block(
                     break
 
         calls.append(ToolCall(name=name, parameters=params, error=error))
+    return calls
+
+
+def _regex_fallback_parse(
+    text: str, param_types: Optional[Dict[str, str]]
+) -> List[ToolCall]:
+    """Extract tool calls from malformed XML using regex.
+
+    Scans for <invoke name="X">...<parameter name="Y">value</parameter>
+    ...</invoke> patterns directly, tolerating structural corruption.
+    """
+    calls: List[ToolCall] = []
+    for invoke_match in _INVOKE_RE.finditer(text):
+        name = invoke_match.group(1).strip()
+        if not name:
+            continue
+        body = invoke_match.group(2)
+        params: Dict[str, Any] = {}
+        for param_match in _PARAM_NAME_RE.finditer(body):
+            param_name = param_match.group(1).strip()
+            param_value = param_match.group(2).strip()
+            if param_name:
+                try:
+                    params[param_name] = _coerce_param(
+                        param_name, param_value, param_types
+                    )
+                except ValueError:
+                    params[param_name] = param_value
+        calls.append(ToolCall(name=name, parameters=params))
     return calls
 
 

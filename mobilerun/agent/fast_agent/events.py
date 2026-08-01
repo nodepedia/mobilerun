@@ -23,6 +23,7 @@ class FastAgentResponseEvent(Event):
     thought: str
     code: Optional[str] = None
     usage: Optional[UsageResult] = None
+    parse_error: Optional[str] = None
 
 
 class FastAgentToolCallEvent(Event):

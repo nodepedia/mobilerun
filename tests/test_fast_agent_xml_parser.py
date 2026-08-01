@@ -25,9 +25,10 @@ I will tap the target.
 </function_calls>
 """
 
-        thought, calls = parse_tool_calls(text, {"x": "number", "y": "number"})
+        thought, calls, err = parse_tool_calls(text, {"x": "number", "y": "number"})
 
         self.assertIn("I will tap", thought)
+        self.assertIsNone(err)
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0].name, "click_at")
         self.assertEqual(calls[0].parameters, {"x": 128, "y": 1560})
@@ -47,8 +48,9 @@ I will tap two different targets.
 </function_calls>
 """
 
-        _, calls = parse_tool_calls(text, {"x": "number", "y": "number"})
+        _, calls, err = parse_tool_calls(text, {"x": "number", "y": "number"})
 
+        self.assertIsNone(err)
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0].parameters, {"x": 128, "y": 1560})
         self.assertEqual(calls[1].parameters, {"x": 200, "y": 1560})
@@ -66,8 +68,9 @@ I will press back twice.
 </function_calls>
 """
 
-        _, calls = parse_tool_calls(text)
+        _, calls, err = parse_tool_calls(text)
 
+        self.assertIsNone(err)
         self.assertEqual(len(calls), 2)
         self.assertEqual(
             [call.name for call in calls], ["system_button", "system_button"]
@@ -90,11 +93,12 @@ I will focus the field and type.
 </function_calls>
 """
 
-        _, calls = parse_tool_calls(
+        _, calls, err = parse_tool_calls(
             text,
             {"x": "number", "y": "number", "clear": "boolean"},
         )
 
+        self.assertIsNone(err)
         self.assertEqual([call.name for call in calls], ["click_at", "type_text"])
         self.assertEqual(calls[0].parameters, {"x": 261, "y": 1888})
         self.assertEqual(
@@ -119,8 +123,9 @@ The task is done.
 </function_calls>
 """
 
-        _, calls = parse_tool_calls(text, {"success": "boolean"})
+        _, calls, err = parse_tool_calls(text, {"success": "boolean"})
 
+        self.assertIsNone(err)
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0].name, "complete")
         self.assertEqual(calls[0].parameters, {"success": True, "message": "Done"})
@@ -142,9 +147,10 @@ Tap once.
 </function_calls>
 """
 
-        _, calls = parse_tool_calls(text, {"x": "number", "y": "number"})
+        _, calls, err = parse_tool_calls(text, {"x": "number", "y": "number"})
         formatted = format_tool_calls(calls)
 
+        self.assertIsNone(err)
         self.assertEqual(formatted.count('<invoke name="click_at">'), 1)
         self.assertIn('<parameter name="x">128</parameter>', formatted)
         self.assertIn('<parameter name="y">1560</parameter>', formatted)
@@ -181,8 +187,9 @@ Tool calls follow."""
 <function_calls>
 <invoke name="click"><parameter name="index">5</parameter></invoke>
 </function_calls>"""
-        thought, calls = parse_tool_calls(text, {"index": "number"})
+        thought, calls, err = parse_tool_calls(text, {"index": "number"})
         memory = extract_add_memory(thought)
+        self.assertIsNone(err)
         self.assertEqual(memory, "Username is admin@test.com")
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0].name, "click")
@@ -194,6 +201,90 @@ Tool calls follow."""
         result = extract_add_memory(text)
         self.assertIn("User email is a@example.com", result)
         self.assertIn("Verification code is 123456", result)
+
+    # -- parse_error / regex fallback tests -----------------------------------
+
+    def test_no_function_calls_returns_none_error(self):
+        text = "Just a thought, no tool calls."
+        _, calls, err = parse_tool_calls(text)
+        self.assertEqual(calls, [])
+        self.assertIsNone(err)
+
+    def test_malformed_xml_returns_parse_error(self):
+        """Completely broken XML with <function_calls> tags but no salvageable invokes."""
+        text = """I'll do something.
+<function_calls>
+<<broken<<< nonsense >>>
+</function_calls>"""
+        _, calls, err = parse_tool_calls(text)
+        self.assertEqual(calls, [])
+        self.assertIsNotNone(err)
+        self.assertIn("could not be parsed", err)
+
+    def test_corrupted_parameter_tag_recovered_by_fallback(self):
+        """Broken tag names inside <invoke> are recovered by regex fallback.
+
+        Simulates the DSML-token-leak corruption observed in production logs:
+        <parameter ...> becomes <DSML ...> for some parameters.
+        """
+        text = """I'll swipe up.
+<function_calls>
+<invoke name="swipe">
+<parameter name="coordinate">[360, 1200]</parameter>
+<DSML name="coordinate2">[360, 400]</DSML>
+<parameter name="duration">1.0</parameter>
+</invoke>
+</function_calls>"""
+        _, calls, err = parse_tool_calls(text)
+
+        # Fallback recovers the tool call and the two well-formed params
+        # (the corrupted <DSML> tag is lost, but parsing does not fail)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].name, "swipe")
+        self.assertIn("coordinate", calls[0].parameters)
+        self.assertIn("duration", calls[0].parameters)
+
+    def test_missing_close_tag_uses_fallback(self):
+        """Missing </invoke> should still be recovered by the fallback."""
+        text = """Click it.
+<function_calls>
+<invoke name="click">
+<parameter name="index">5</parameter>
+</function_calls>"""
+        _, calls, err = parse_tool_calls(text, {"index": "number"})
+
+        # Should recover the call via fallback even though </invoke> is missing
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].name, "click")
+        self.assertEqual(calls[0].parameters, {"index": 5})
+
+    def test_completely_garbled_returns_error(self):
+        """Completely garbled content inside <function_calls> yields parse_error."""
+        text = """Doing things.
+<function_calls>
+this is not xml at all, just random text with < and > symbols everywhere
+</function_calls>"""
+        _, calls, err = parse_tool_calls(text)
+        self.assertEqual(calls, [])
+        self.assertIsNotNone(err)
+
+    def test_partial_corruption_recovers_valid_invokes(self):
+        """When one invoke is corrupted but another is valid, recover the valid one."""
+        text = """Two actions.
+<function_calls>
+<invoke name="click">
+<parameter name="index">3</parameter>
+</invoke>
+<invoke name="broken<<<
+<DSML name="x">bad</DSML>
+</invoke>
+</function_calls>"""
+        _, calls, err = parse_tool_calls(text, {"index": "number"})
+
+        # At least the first valid invoke should be recovered
+        self.assertGreaterEqual(len(calls), 1)
+        self.assertEqual(calls[0].name, "click")
+        self.assertEqual(calls[0].parameters, {"index": 3})
 
 
 if __name__ == "__main__":

@@ -108,6 +108,7 @@ class FastAgent(Workflow):
 
         self.system_prompt: ChatMessage | None = None
         self.tool_call_counter = 0
+        self._consecutive_parse_failures = 0
 
         # Build tool descriptions and param types from registry
         self.tool_descriptions = self.registry.get_tool_descriptions_xml()
@@ -373,7 +374,9 @@ class FastAgent(Workflow):
         response_text = response.message.content
 
         # Parse tool calls from response
-        thought, tool_calls = parse_tool_calls(response_text, self.param_types)
+        thought, tool_calls, parse_error = parse_tool_calls(
+            response_text, self.param_types
+        )
 
         # Extract <add_memory> from thought text and append to unified memory
         memory_update = extract_add_memory(thought)
@@ -396,6 +399,7 @@ class FastAgent(Workflow):
             thought=thought,
             code=tool_calls_xml,
             usage=usage,
+            parse_error=parse_error,
         )
         ctx.write_event_to_stream(event)
         return event
@@ -406,6 +410,42 @@ class FastAgent(Workflow):
     ) -> FastAgentToolCallEvent | FastAgentInputEvent:
         """Route to execution or request tool call if missing."""
         has_tool_calls = ev.code is not None
+
+        # --- Parse-error feedback (before anything else) -----------------
+        if ev.parse_error:
+            self._consecutive_parse_failures += 1
+            logger.warning(
+                "Tool call parse failure #%d: %s",
+                self._consecutive_parse_failures,
+                ev.parse_error,
+            )
+
+            if self._consecutive_parse_failures >= 3:
+                # Escalation: provide a complete copy-pasteable template
+                escalation = (
+                    f"Your last {self._consecutive_parse_failures} responses contained "
+                    "malformed XML and could not be parsed. "
+                    "STOP generating free-form XML. Copy this template exactly and "
+                    "fill in your values:\n\n"
+                    "<function_calls>\n"
+                    '<invoke name="complete">\n'
+                    '<parameter name="success">true</parameter>\n'
+                    '<parameter name="message">your explanation here</parameter>\n'
+                    "</invoke>\n"
+                    "</function_calls>"
+                )
+                self.shared_state.message_history.append(
+                    ChatMessage(role="user", content=escalation)
+                )
+            else:
+                self.shared_state.message_history.append(
+                    ChatMessage(role="user", content=ev.parse_error)
+                )
+            return FastAgentInputEvent()
+
+        # Parsing succeeded (even if zero calls) — reset counter
+        if self._consecutive_parse_failures > 0:
+            self._consecutive_parse_failures = 0
 
         if not ev.thought:
             logger.warning("LLM provided tool calls without reasoning.")
